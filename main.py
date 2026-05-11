@@ -30,19 +30,13 @@ async def upload_image(url):
         return url
 
 async def parse_bill(content, thread_name):
-    link = None
-    date = None
-    for line in content.splitlines():
-        line = line.strip()
-        if line.lower().startswith("link:"):
-            link = line.split(":", 1)[1].strip()
-        elif line.lower().startswith("date passed:"):
-            date = line.split(":", 1)[1].strip()
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
     return {
         "type": "bill",
         "title": thread_name,
-        "link": link,
-        "date_passed": date
+        "link": lines[0] if len(lines) > 0 else None,
+        "date_passed": lines[1] if len(lines) > 1 else None,
+        "bill_author": lines[2] if len(lines) > 2 else None
     }
 
 async def parse_job(message, thread_name):
@@ -97,11 +91,9 @@ async def on_ready():
 async def on_thread_delete(thread):
     if not thread.parent:
         return
-
     channel_name = thread.parent.name
     if channel_name not in ["passed-bills", "jobs"]:
         return
-
     headers = {
         "Authorization": f"token {GIST_TOKEN}",
         "Accept": "application/vnd.github.v3+json"
@@ -109,14 +101,12 @@ async def on_thread_delete(thread):
     existing = get_gist_data(headers)
     if existing is None:
         return
-
     before = len(existing.get("messages", []))
     existing["messages"] = [
         m for m in existing.get("messages", [])
         if not (m.get("channel") == channel_name and m.get("thread") == thread.name)
     ]
     after = len(existing["messages"])
-
     if before != after:
         save_gist_data(headers, existing)
         print(f"🗑️ Removed '{thread.name}' from Gist ({before - after} entry removed)")
