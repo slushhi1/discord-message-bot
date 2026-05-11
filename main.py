@@ -71,6 +71,12 @@ def save_gist_data(headers, existing):
         json={"files": {"bloom-data.json": {"content": json.dumps(existing, indent=2)}}}
     )
 
+def thread_already_in_gist(existing, channel_name, thread_name):
+    return any(
+        m.get("channel") == channel_name and m.get("thread") == thread_name
+        for m in existing.get("messages", [])
+    )
+
 async def update_gist(new_message):
     headers = {
         "Authorization": f"token {GIST_TOKEN}",
@@ -92,7 +98,7 @@ async def on_thread_delete(thread):
     if not thread.parent:
         return
     channel_name = thread.parent.name
-    if channel_name not in ["passed-bills", "jobs"]:
+    if channel_name not in ["passed-bills", "jobs", "properties"]:
         return
     headers = {
         "Authorization": f"token {GIST_TOKEN}",
@@ -121,41 +127,68 @@ async def on_message(message):
     if isinstance(message.channel, discord.Thread):
         channel_name = message.channel.parent.name if message.channel.parent else message.channel.name
         thread_name = message.channel.name
-        history = [m async for m in message.channel.history(limit=2, oldest_first=True)]
-        if len(history) > 0 and history[0].id != message.id:
-            return
     else:
         channel_name = message.channel.name
         thread_name = None
 
-    allowed_channels = ["announcements", "jobs", "passed-bills"]
+    allowed_channels = ["announcements", "jobs", "passed-bills", "properties"]
     if channel_name not in allowed_channels:
         return
 
-    user_roles = [role.name for role in message.author.roles if role.name != "@everyone"]
+    headers = {
+        "Authorization": f"token {GIST_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+
+    # For forum threads — check if already in Gist, if so skip
+    if thread_name:
+        existing = get_gist_data(headers)
+        if existing is None:
+            return
+
+        if thread_already_in_gist(existing, channel_name, thread_name):
+            print(f"⏭️ [{channel_name}] '{thread_name}' already in Gist, skipping")
+            await bot.process_commands(message)
+            return
+
+        # Fetch the first message of the thread
+        history = [m async for m in message.channel.history(limit=1, oldest_first=True)]
+        if not history:
+            await bot.process_commands(message)
+            return
+        first_message = history[0]
+    else:
+        first_message = message
+        existing = get_gist_data(headers)
+        if existing is None:
+            return
+
+    user_roles = [role.name for role in first_message.author.roles if role.name != "@everyone"]
 
     message_data = {
-        "author": message.author.name,
-        "display_name": message.author.display_name,
-        "author_id": message.author.id,
+        "author": first_message.author.name,
+        "display_name": first_message.author.display_name,
+        "author_id": first_message.author.id,
         "channel": channel_name,
         "thread": thread_name,
-        "timestamp": message.created_at.isoformat(),
+        "timestamp": first_message.created_at.isoformat(),
         "roles": user_roles
     }
 
     if channel_name == "passed-bills":
-        parsed = await parse_bill(message.content, thread_name)
+        parsed = await parse_bill(first_message.content, thread_name)
         message_data.update(parsed)
-    elif channel_name == "jobs":
-        parsed = await parse_job(message, thread_name)
+    elif channel_name in ["jobs", "properties"]:
+        parsed = await parse_job(first_message, thread_name)
         message_data.update(parsed)
     else:
-        message_data["content"] = message.content
+        message_data["content"] = first_message.content
 
-    print(f"📝 [{channel_name}] {message.author.display_name}: {thread_name or message.content[:50]}")
+    print(f"📝 [{channel_name}] {first_message.author.display_name}: {thread_name or first_message.content[:50]}")
 
-    await update_gist(message_data)
+    existing.setdefault("messages", []).insert(0, message_data)
+    existing["messages"] = existing["messages"][:50]
+    save_gist_data(headers, message_data if False else existing)
     await bot.process_commands(message)
 
 TOKEN = os.environ.get("DISCORD_TOKEN")
