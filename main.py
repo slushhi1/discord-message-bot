@@ -62,6 +62,7 @@ async def on_message(message):
         "content": message.content,
         "author": message.author.name,
         "author_id": message.author.id,
+        "display_name": message.author.display_name,
         "channel": channel_name,
         "thread": thread_name,
         "timestamp": message.created_at.isoformat()
@@ -70,7 +71,7 @@ async def on_message(message):
     user_roles = [role.name for role in message.author.roles if role.name != "@everyone"]
     message_data["roles"] = user_roles
 
-    print(f"📝 [{channel_name}] {message.author.name}: {message.content}")
+    print(f"📝 [{channel_name}] {message.author.display_name}: {message.content}")
 
     await update_gist(message_data)
     await bot.process_commands(message)
