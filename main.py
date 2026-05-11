@@ -9,7 +9,7 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-GIST_ID = "your_actual_gist_id"
+GIST_ID = "c0e6631773692d0c353929162506b70d"
 GIST_TOKEN = os.environ.get("GITHUB_GIST_TOKEN")
 
 async def update_gist(new_message):
@@ -21,7 +21,15 @@ async def update_gist(new_message):
         f"https://api.github.com/gists/{GIST_ID}",
         headers=headers
     )
-    existing = json.loads(response.json()["files"]["bloom-data.json"]["content"])
+    
+    data = response.json()
+    print(f"Gist API response status: {response.status_code}")
+    
+    if "files" not in data:
+        print(f"Error from GitHub: {data.get('message', 'unknown error')}")
+        return
+    
+    existing = json.loads(data["files"]["bloom-data.json"]["content"])
     existing.setdefault("messages", []).insert(0, new_message)
     existing["messages"] = existing["messages"][:50]
     requests.patch(
@@ -39,7 +47,6 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    # Get the channel name — for forum threads, use the parent channel name
     if isinstance(message.channel, discord.Thread):
         channel_name = message.channel.parent.name if message.channel.parent else message.channel.name
         thread_name = message.channel.name
