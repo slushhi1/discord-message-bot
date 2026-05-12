@@ -82,15 +82,6 @@ def thread_already_in_gist(existing, channel_name, thread_name):
         for m in existing.get("messages", [])
     )
 
-async def update_gist(new_message):
-    headers = {"Authorization": f"token {GIST_TOKEN}", "Accept": "application/vnd.github.v3+json"}
-    existing = get_gist_data(headers)
-    if existing is None:
-        return
-    existing.setdefault("messages", []).insert(0, new_message)
-    existing["messages"] = existing["messages"][:50]
-    save_gist_data(headers, existing)
-
 async def scan_government_roles():
     headers = {"Authorization": f"token {GIST_TOKEN}", "Accept": "application/vnd.github.v3+json"}
     existing = get_gist_data(headers)
@@ -104,7 +95,6 @@ async def scan_government_roles():
         for role_name in TRACKED_ROLES:
             role = discord.utils.get(guild.roles, name=role_name)
             if role:
-                # Use IGN if set, otherwise fall back to display name
                 members = [
                     ign_map.get(str(m.id), m.display_name)
                     for m in role.members
@@ -126,7 +116,11 @@ async def refresh_government():
 @bot.event
 async def on_ready():
     print(f"✅ Bot online! Logged in as {bot.user}")
-    await bot.tree.sync()
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ Synced {len(synced)} slash commands")
+    except Exception as e:
+        print(f"❌ Slash command sync failed: {e}")
     await scan_government_roles()
     refresh_government.start()
 
@@ -136,7 +130,17 @@ async def on_member_update(before, after):
         print(f"🔄 Role change for {after.display_name}, updating roster...")
         await scan_government_roles()
 
-# /setign command
+# Manual sync command — run !sync as bot owner if slash commands don't appear
+@bot.command()
+@commands.is_owner()
+async def sync(ctx):
+    try:
+        synced = await bot.tree.sync()
+        await ctx.send(f"✅ Synced {len(synced)} slash commands!")
+    except Exception as e:
+        await ctx.send(f"❌ Sync failed: {e}")
+
+# /setign
 @bot.tree.command(name="setign", description="Set your Minecraft IGN for display on the Bloom website")
 @app_commands.describe(ign="Your Minecraft username (case sensitive)")
 async def setign(interaction: discord.Interaction, ign: str):
@@ -148,8 +152,6 @@ async def setign(interaction: discord.Interaction, ign: str):
 
     existing.setdefault("ign_map", {})[str(interaction.user.id)] = ign
     save_gist_data(headers, existing)
-
-    # Re-scan so the site updates immediately
     await scan_government_roles()
 
     await interaction.response.send_message(
@@ -158,7 +160,7 @@ async def setign(interaction: discord.Interaction, ign: str):
     )
     print(f"IGN set: {interaction.user.display_name} → {ign}")
 
-# /removeign command
+# /removeign
 @bot.tree.command(name="removeign", description="Remove your custom IGN and revert to your Discord nickname")
 async def removeign(interaction: discord.Interaction):
     headers = {"Authorization": f"token {GIST_TOKEN}", "Accept": "application/vnd.github.v3+json"}
@@ -174,7 +176,10 @@ async def removeign(interaction: discord.Interaction):
         existing["ign_map"] = ign_map
         save_gist_data(headers, existing)
         await scan_government_roles()
-        await interaction.response.send_message(f"✅ IGN **{removed}** removed. Your Discord nickname will be used instead.", ephemeral=True)
+        await interaction.response.send_message(
+            f"✅ IGN **{removed}** removed. Your Discord nickname will be used instead.",
+            ephemeral=True
+        )
     else:
         await interaction.response.send_message("You don't have a custom IGN set.", ephemeral=True)
 
