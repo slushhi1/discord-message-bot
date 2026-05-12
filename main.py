@@ -44,6 +44,9 @@ def save_gist_data(headers, existing):
         json={"files": {"bloom-data.json": {"content": json.dumps(existing, indent=2)}}}
     )
 
+def is_admin(member):
+    return any(role.name == "Admin" for role in member.roles)
+
 async def upload_image(url):
     try:
         result = cloudinary.uploader.upload(url)
@@ -130,9 +133,7 @@ async def on_member_update(before, after):
         print(f"🔄 Role change for {after.display_name}, updating roster...")
         await scan_government_roles()
 
-# Manual sync command — run !sync as bot owner if slash commands don't appear
 @bot.command()
-@commands.is_owner()
 async def sync(ctx):
     try:
         synced = await bot.tree.sync()
@@ -140,48 +141,79 @@ async def sync(ctx):
     except Exception as e:
         await ctx.send(f"❌ Sync failed: {e}")
 
-# /setign
-@bot.tree.command(name="setign", description="Set your Minecraft IGN for display on the Bloom website")
-@app_commands.describe(ign="Your Minecraft username (case sensitive)")
-async def setign(interaction: discord.Interaction, ign: str):
+# /setign — self or admin setting for another user
+@bot.tree.command(name="setign", description="Set a Minecraft IGN for display on the Bloom website")
+@app_commands.describe(
+    ign="Minecraft username (case sensitive)",
+    user="The user to set the IGN for (Admin only)"
+)
+async def setign(interaction: discord.Interaction, ign: str, user: discord.Member = None):
     headers = {"Authorization": f"token {GIST_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+
+    # If targeting another user, must be admin
+    if user is not None and user != interaction.user:
+        if not is_admin(interaction.user):
+            await interaction.response.send_message(
+                "❌ Only Admins can set IGNs for other users.", ephemeral=True
+            )
+            return
+        target = user
+    else:
+        target = interaction.user
+
     existing = get_gist_data(headers)
     if existing is None:
         await interaction.response.send_message("❌ Could not connect to Gist. Try again later.", ephemeral=True)
         return
 
-    existing.setdefault("ign_map", {})[str(interaction.user.id)] = ign
+    existing.setdefault("ign_map", {})[str(target.id)] = ign
     save_gist_data(headers, existing)
     await scan_government_roles()
 
-    await interaction.response.send_message(
-        f"✅ Your IGN has been set to **{ign}**. It will now appear on the Bloom website.",
-        ephemeral=True
-    )
-    print(f"IGN set: {interaction.user.display_name} → {ign}")
+    if target == interaction.user:
+        msg = f"✅ Your IGN has been set to **{ign}**."
+    else:
+        msg = f"✅ IGN for {target.display_name} has been set to **{ign}**."
+
+    await interaction.response.send_message(msg, ephemeral=True)
+    print(f"IGN set: {target.display_name} → {ign} (by {interaction.user.display_name})")
 
 # /removeign
-@bot.tree.command(name="removeign", description="Remove your custom IGN and revert to your Discord nickname")
-async def removeign(interaction: discord.Interaction):
+@bot.tree.command(name="removeign", description="Remove a custom IGN and revert to Discord nickname")
+@app_commands.describe(user="The user to remove the IGN for (Admin only, leave blank for yourself)")
+async def removeign(interaction: discord.Interaction, user: discord.Member = None):
     headers = {"Authorization": f"token {GIST_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+
+    if user is not None and user != interaction.user:
+        if not is_admin(interaction.user):
+            await interaction.response.send_message(
+                "❌ Only Admins can remove IGNs for other users.", ephemeral=True
+            )
+            return
+        target = user
+    else:
+        target = interaction.user
+
     existing = get_gist_data(headers)
     if existing is None:
         await interaction.response.send_message("❌ Could not connect to Gist.", ephemeral=True)
         return
 
     ign_map = existing.get("ign_map", {})
-    uid = str(interaction.user.id)
+    uid = str(target.id)
     if uid in ign_map:
         removed = ign_map.pop(uid)
         existing["ign_map"] = ign_map
         save_gist_data(headers, existing)
         await scan_government_roles()
-        await interaction.response.send_message(
-            f"✅ IGN **{removed}** removed. Your Discord nickname will be used instead.",
-            ephemeral=True
-        )
+        if target == interaction.user:
+            msg = f"✅ Your IGN **{removed}** has been removed."
+        else:
+            msg = f"✅ IGN **{removed}** removed for {target.display_name}."
+        await interaction.response.send_message(msg, ephemeral=True)
     else:
-        await interaction.response.send_message("You don't have a custom IGN set.", ephemeral=True)
+        name = "You don't" if target == interaction.user else f"{target.display_name} doesn't"
+        await interaction.response.send_message(f"{name} have a custom IGN set.", ephemeral=True)
 
 @bot.event
 async def on_thread_delete(thread):
