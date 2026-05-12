@@ -4,7 +4,7 @@ import requests
 import json
 import cloudinary
 import cloudinary.uploader
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -20,6 +20,19 @@ cloudinary.config(
     api_key=os.environ.get("CLOUDINARY_API_KEY"),
     api_secret=os.environ.get("CLOUDINARY_API_SECRET")
 )
+
+TRACKED_ROLES = [
+    "President",
+    "Speaker",
+    "Congress Member",
+    "Secretary of State",
+    "Secretary of Treasury",
+    "Secretary of Interior",
+    "Secretary of Agriculture",
+    "Secretary of Education",
+    "Secretary of Defense",
+    "Secretary of Archives",
+]
 
 async def upload_image(url):
     try:
@@ -54,10 +67,7 @@ async def parse_job(message, thread_name):
     }
 
 def get_gist_data(headers):
-    response = requests.get(
-        f"https://api.github.com/gists/{GIST_ID}",
-        headers=headers
-    )
+    response = requests.get(f"https://api.github.com/gists/{GIST_ID}", headers=headers)
     data = response.json()
     if "files" not in data:
         print(f"Error from GitHub: {data.get('message', 'unknown error')}")
@@ -78,10 +88,7 @@ def thread_already_in_gist(existing, channel_name, thread_name):
     )
 
 async def update_gist(new_message):
-    headers = {
-        "Authorization": f"token {GIST_TOKEN}",
-        "Accept": "application/vnd.github.v3+json"
-    }
+    headers = {"Authorization": f"token {GIST_TOKEN}", "Accept": "application/vnd.github.v3+json"}
     existing = get_gist_data(headers)
     if existing is None:
         return
@@ -89,9 +96,42 @@ async def update_gist(new_message):
     existing["messages"] = existing["messages"][:50]
     save_gist_data(headers, existing)
 
+async def scan_government_roles():
+    headers = {"Authorization": f"token {GIST_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+    government = {}
+    for guild in bot.guilds:
+        for role_name in TRACKED_ROLES:
+            role = discord.utils.get(guild.roles, name=role_name)
+            if role:
+                members = [m.display_name for m in role.members]
+                government[role_name] = members
+                print(f"  {role_name}: {members}")
+            else:
+                government[role_name] = []
+                print(f"  {role_name}: role not found")
+
+    existing = get_gist_data(headers)
+    if existing is None:
+        return
+    existing["government"] = government
+    save_gist_data(headers, existing)
+    print("✅ Government roles updated in Gist")
+
+@tasks.loop(minutes=30)
+async def refresh_government():
+    await scan_government_roles()
+
 @bot.event
 async def on_ready():
     print(f"✅ Bot online! Logged in as {bot.user}")
+    await scan_government_roles()
+    refresh_government.start()
+
+@bot.event
+async def on_member_update(before, after):
+    if before.roles != after.roles:
+        print(f"🔄 Role change detected for {after.display_name}, updating government roster...")
+        await scan_government_roles()
 
 @bot.event
 async def on_thread_delete(thread):
@@ -100,10 +140,7 @@ async def on_thread_delete(thread):
     channel_name = thread.parent.name
     if channel_name not in ["passed-bills", "jobs", "properties"]:
         return
-    headers = {
-        "Authorization": f"token {GIST_TOKEN}",
-        "Accept": "application/vnd.github.v3+json"
-    }
+    headers = {"Authorization": f"token {GIST_TOKEN}", "Accept": "application/vnd.github.v3+json"}
     existing = get_gist_data(headers)
     if existing is None:
         return
@@ -115,9 +152,7 @@ async def on_thread_delete(thread):
     after = len(existing["messages"])
     if before != after:
         save_gist_data(headers, existing)
-        print(f"🗑️ Removed '{thread.name}' from Gist ({before - after} entry removed)")
-    else:
-        print(f"⚠️ Thread '{thread.name}' not found in Gist, nothing removed")
+        print(f"🗑️ Removed '{thread.name}' from Gist")
 
 @bot.event
 async def on_message(message):
@@ -135,23 +170,16 @@ async def on_message(message):
     if channel_name not in allowed_channels:
         return
 
-    headers = {
-        "Authorization": f"token {GIST_TOKEN}",
-        "Accept": "application/vnd.github.v3+json"
-    }
+    headers = {"Authorization": f"token {GIST_TOKEN}", "Accept": "application/vnd.github.v3+json"}
 
-    # For forum threads — check if already in Gist, if so skip
     if thread_name:
         existing = get_gist_data(headers)
         if existing is None:
             return
-
         if thread_already_in_gist(existing, channel_name, thread_name):
             print(f"⏭️ [{channel_name}] '{thread_name}' already in Gist, skipping")
             await bot.process_commands(message)
             return
-
-        # Fetch the first message of the thread
         history = [m async for m in message.channel.history(limit=1, oldest_first=True)]
         if not history:
             await bot.process_commands(message)
@@ -188,7 +216,7 @@ async def on_message(message):
 
     existing.setdefault("messages", []).insert(0, message_data)
     existing["messages"] = existing["messages"][:50]
-    save_gist_data(headers, message_data if False else existing)
+    save_gist_data(headers, existing)
     await bot.process_commands(message)
 
 TOKEN = os.environ.get("DISCORD_TOKEN")
