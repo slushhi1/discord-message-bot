@@ -5,6 +5,7 @@ import json
 import cloudinary
 import cloudinary.uploader
 from discord.ext import commands, tasks
+from discord import app_commands
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -22,17 +23,26 @@ cloudinary.config(
 )
 
 TRACKED_ROLES = [
-    "President",
-    "Speaker",
-    "Congress Member",
-    "Secretary of State",
-    "Secretary of Treasury",
-    "Secretary of Interior",
-    "Secretary of Agriculture",
-    "Secretary of Education",
-    "Secretary of Defense",
-    "Secretary of Archives",
+    "President", "Speaker", "Congress Member",
+    "Secretary of State", "Secretary of Treasury", "Secretary of Interior",
+    "Secretary of Agriculture", "Secretary of Education",
+    "Secretary of Defense", "Secretary of Archives",
 ]
+
+def get_gist_data(headers):
+    response = requests.get(f"https://api.github.com/gists/{GIST_ID}", headers=headers)
+    data = response.json()
+    if "files" not in data:
+        print(f"Error from GitHub: {data.get('message', 'unknown error')}")
+        return None
+    return json.loads(data["files"]["bloom-data.json"]["content"])
+
+def save_gist_data(headers, existing):
+    requests.patch(
+        f"https://api.github.com/gists/{GIST_ID}",
+        headers=headers,
+        json={"files": {"bloom-data.json": {"content": json.dumps(existing, indent=2)}}}
+    )
 
 async def upload_image(url):
     try:
@@ -66,21 +76,6 @@ async def parse_job(message, thread_name):
         "image": image_url
     }
 
-def get_gist_data(headers):
-    response = requests.get(f"https://api.github.com/gists/{GIST_ID}", headers=headers)
-    data = response.json()
-    if "files" not in data:
-        print(f"Error from GitHub: {data.get('message', 'unknown error')}")
-        return None
-    return json.loads(data["files"]["bloom-data.json"]["content"])
-
-def save_gist_data(headers, existing):
-    requests.patch(
-        f"https://api.github.com/gists/{GIST_ID}",
-        headers=headers,
-        json={"files": {"bloom-data.json": {"content": json.dumps(existing, indent=2)}}}
-    )
-
 def thread_already_in_gist(existing, channel_name, thread_name):
     return any(
         m.get("channel") == channel_name and m.get("thread") == thread_name
@@ -98,21 +93,28 @@ async def update_gist(new_message):
 
 async def scan_government_roles():
     headers = {"Authorization": f"token {GIST_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+    existing = get_gist_data(headers)
+    if existing is None:
+        return
+
+    ign_map = existing.get("ign_map", {})
     government = {}
+
     for guild in bot.guilds:
         for role_name in TRACKED_ROLES:
             role = discord.utils.get(guild.roles, name=role_name)
             if role:
-                members = [m.display_name for m in role.members]
+                # Use IGN if set, otherwise fall back to display name
+                members = [
+                    ign_map.get(str(m.id), m.display_name)
+                    for m in role.members
+                ]
                 government[role_name] = members
                 print(f"  {role_name}: {members}")
             else:
                 government[role_name] = []
                 print(f"  {role_name}: role not found")
 
-    existing = get_gist_data(headers)
-    if existing is None:
-        return
     existing["government"] = government
     save_gist_data(headers, existing)
     print("✅ Government roles updated in Gist")
@@ -124,14 +126,57 @@ async def refresh_government():
 @bot.event
 async def on_ready():
     print(f"✅ Bot online! Logged in as {bot.user}")
+    await bot.tree.sync()
     await scan_government_roles()
     refresh_government.start()
 
 @bot.event
 async def on_member_update(before, after):
     if before.roles != after.roles:
-        print(f"🔄 Role change detected for {after.display_name}, updating government roster...")
+        print(f"🔄 Role change for {after.display_name}, updating roster...")
         await scan_government_roles()
+
+# /setign command
+@bot.tree.command(name="setign", description="Set your Minecraft IGN for display on the Bloom website")
+@app_commands.describe(ign="Your Minecraft username (case sensitive)")
+async def setign(interaction: discord.Interaction, ign: str):
+    headers = {"Authorization": f"token {GIST_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+    existing = get_gist_data(headers)
+    if existing is None:
+        await interaction.response.send_message("❌ Could not connect to Gist. Try again later.", ephemeral=True)
+        return
+
+    existing.setdefault("ign_map", {})[str(interaction.user.id)] = ign
+    save_gist_data(headers, existing)
+
+    # Re-scan so the site updates immediately
+    await scan_government_roles()
+
+    await interaction.response.send_message(
+        f"✅ Your IGN has been set to **{ign}**. It will now appear on the Bloom website.",
+        ephemeral=True
+    )
+    print(f"IGN set: {interaction.user.display_name} → {ign}")
+
+# /removeign command
+@bot.tree.command(name="removeign", description="Remove your custom IGN and revert to your Discord nickname")
+async def removeign(interaction: discord.Interaction):
+    headers = {"Authorization": f"token {GIST_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+    existing = get_gist_data(headers)
+    if existing is None:
+        await interaction.response.send_message("❌ Could not connect to Gist.", ephemeral=True)
+        return
+
+    ign_map = existing.get("ign_map", {})
+    uid = str(interaction.user.id)
+    if uid in ign_map:
+        removed = ign_map.pop(uid)
+        existing["ign_map"] = ign_map
+        save_gist_data(headers, existing)
+        await scan_government_roles()
+        await interaction.response.send_message(f"✅ IGN **{removed}** removed. Your Discord nickname will be used instead.", ephemeral=True)
+    else:
+        await interaction.response.send_message("You don't have a custom IGN set.", ephemeral=True)
 
 @bot.event
 async def on_thread_delete(thread):
@@ -149,8 +194,7 @@ async def on_thread_delete(thread):
         m for m in existing.get("messages", [])
         if not (m.get("channel") == channel_name and m.get("thread") == thread.name)
     ]
-    after = len(existing["messages"])
-    if before != after:
+    if before != len(existing["messages"]):
         save_gist_data(headers, existing)
         print(f"🗑️ Removed '{thread.name}' from Gist")
 
